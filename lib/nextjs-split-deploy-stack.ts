@@ -3,18 +3,23 @@ import {
   AllowedMethods,
   CachedMethods,
   Distribution,
+  FunctionCode,
+  FunctionEventType,
+  FunctionRuntime,
   OriginAccessIdentity,
   ResponseHeadersPolicy,
   ViewerProtocolPolicy,
 } from "aws-cdk-lib/aws-cloudfront"
 import { S3Origin } from "aws-cdk-lib/aws-cloudfront-origins"
 import { Platform } from "aws-cdk-lib/aws-ecr-assets"
+import { CanonicalUserPrincipal, PolicyStatement } from "aws-cdk-lib/aws-iam"
 import { DockerImageCode, DockerImageFunction } from "aws-cdk-lib/aws-lambda"
 import { NodejsFunction } from "aws-cdk-lib/aws-lambda-nodejs"
 import { RetentionDays } from "aws-cdk-lib/aws-logs"
-import { Bucket } from "aws-cdk-lib/aws-s3"
+import { BlockPublicAccess, Bucket } from "aws-cdk-lib/aws-s3"
 import { BucketDeployment, Source } from "aws-cdk-lib/aws-s3-deployment"
 import { Construct } from "constructs"
+import { readFileSync } from "fs"
 
 export class NextjsSplitDeployStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props?: cdk.StackProps) {
@@ -34,6 +39,7 @@ export class NextjsSplitDeployStack extends cdk.Stack {
             allowedOrigins: ["*"],
           },
         ],
+        blockPublicAccess: BlockPublicAccess.BLOCK_ALL,
       }
     )
     // const nextjsEnvBucket = new Bucket(this, "NextjsEnvBucket", {
@@ -59,6 +65,24 @@ export class NextjsSplitDeployStack extends cdk.Stack {
       destinationBucket: nextjsStaticAssetsBucket,
       destinationKeyPrefix: "public",
     })
+
+    // Origin Access Identity (OAI) の作成
+    const originAccessIdentity = new OriginAccessIdentity(this, "OAI", {
+      comment: "OAI for NextjsStaticAssetsBucket",
+    })
+
+    // バケットポリシーの設定
+    nextjsStaticAssetsBucket.addToResourcePolicy(
+      new PolicyStatement({
+        actions: ["s3:GetObject"],
+        resources: [`${nextjsStaticAssetsBucket.bucketArn}/*`],
+        principals: [
+          new CanonicalUserPrincipal(
+            originAccessIdentity.cloudFrontOriginAccessIdentityS3CanonicalUserId
+          ),
+        ],
+      })
+    )
 
     // Lambdaの定義
     const nextjsImageFunction = new DockerImageFunction(
@@ -106,6 +130,19 @@ export class NextjsSplitDeployStack extends cdk.Stack {
         authType: cdk.aws_lambda.FunctionUrlAuthType.AWS_IAM,
       })
     nextjsStaticAssetsBucket.grantReadWrite(createDownloadPresignedUrlFunction)
+
+    // ViewerRequestをはじく関数
+    const viewerFunction = new cdk.aws_cloudfront.Function(
+      this,
+      "viewerFunction",
+      {
+        code: FunctionCode.fromInline(
+          readFileSync("./lambda/viewer.js", "utf8")
+        ),
+        runtime: FunctionRuntime.JS_2_0,
+        functionName: "viewerFunction",
+      }
+    )
 
     // CloudFrontの定義
     const distribution = new cdk.aws_cloudfront.Distribution(
@@ -157,14 +194,14 @@ export class NextjsSplitDeployStack extends cdk.Stack {
           },
           "/env/*": {
             origin: new S3Origin(nextjsStaticAssetsBucket, {
-              originAccessIdentity: new OriginAccessIdentity(
-                this,
-                "OriginAccessIdentityForEnv",
-                {
-                  comment: "Origin Access Identity for Env Files",
-                }
-              ),
+              originAccessIdentity: originAccessIdentity,
             }),
+            functionAssociations: [
+              {
+                eventType: FunctionEventType.VIEWER_REQUEST,
+                function: viewerFunction,
+              },
+            ],
             viewerProtocolPolicy: ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
             responseHeadersPolicy: ResponseHeadersPolicy.CORS_ALLOW_ALL_ORIGINS,
             allowedMethods: AllowedMethods.ALLOW_GET_HEAD,
@@ -267,6 +304,7 @@ export class NextjsSplitDeployStack extends cdk.Stack {
     new BucketDeployment(this, "DeployNextjsEnvJson", {
       sources: [
         Source.jsonData("env.json", {
+          cloudfrontUrl: `https://${distribution.distributionDomainName}`,
           downloadS3Lambda: createDownloadPresignedUrlFunctionURL.url,
         }),
         Source.jsonData("env.prod.json", {

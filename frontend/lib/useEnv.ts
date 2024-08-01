@@ -1,8 +1,7 @@
 import useSWR from "swr"
 
 interface Env {
-  bucketName: string | undefined
-  bucketUrl: string
+  cloudfrontUrl: string
   downloadS3Lambda: string
 }
 
@@ -19,14 +18,21 @@ export default function useEnv() {
   if (!env) {
     return {
       env: Object.freeze({
-        bucketName: "not found",
+        cloudfrontUrl: "not found",
       }) as Env,
     }
   }
   console.log(env)
 
   const downloadFile = async (url: string) => {
-    const downloadResponse = await fetch("/create-presigned-url")
+    const downloadResponse = await fetch("/create-presigned-url", {
+      // 途中
+      method: "PUT",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ url: url }),
+    })
     if (!downloadResponse.ok) {
       throw new Error("Failed to fetch downloadResponse")
     }
@@ -43,7 +49,7 @@ export default function useEnv() {
     const json = JSON.parse(text)
     console.log(json)
   }
-  downloadFile(env.downloadS3Lambda)
+  downloadFile(env.cloudfrontUrl)
 
   return { env: Object.freeze(env) }
 }
